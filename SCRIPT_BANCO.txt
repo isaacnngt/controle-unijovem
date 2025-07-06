@@ -1,0 +1,247 @@
+-- =============================================================================
+-- SCRIPT DE CRIAÇÃO DO BANCO DE DADOS - SISTEMA UNIJOVEM
+-- =============================================================================
+
+-- Criar o banco de dados (execute separadamente se necessário)
+-- CREATE DATABASE unijovem;
+
+-- Conectar ao banco unijovem antes de executar os scripts abaixo
+-- \c unijovem;
+
+-- =============================================================================
+-- TABELA: usuario_tb
+-- =============================================================================
+CREATE TABLE usuario_tb (
+    id SERIAL PRIMARY KEY,
+    nome VARCHAR(200) NOT NULL,
+    sexo CHAR(1),
+    tamanho_camisa VARCHAR(5),
+    responsavel_direto VARCHAR(200),
+    dt_nascimento DATE,
+    cargo_min BOOLEAN DEFAULT FALSE,
+    cargo_unijovem VARCHAR(60),
+    dividas BOOLEAN DEFAULT FALSE,
+    dt_inclusao TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    dt_alteracao TIMESTAMP
+);
+
+-- Índices para melhor performance
+CREATE INDEX idx_usuario_nome ON usuario_tb(nome);
+CREATE INDEX idx_usuario_sexo ON usuario_tb(sexo);
+CREATE INDEX idx_usuario_cargo_min ON usuario_tb(cargo_min);
+CREATE INDEX idx_usuario_dividas ON usuario_tb(dividas);
+
+-- =============================================================================
+-- TABELA: parametros_tb
+-- =============================================================================
+CREATE TABLE parametros_tb (
+    id SERIAL PRIMARY KEY,
+    vl_mensalidade NUMERIC(10,2) NOT NULL,
+    vl_camisa NUMERIC(10,2) NOT NULL,
+    dt_inclusao TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    dt_alteracao TIMESTAMP
+);
+
+-- =============================================================================
+-- TABELA: prestacao_contas_tb
+-- =============================================================================
+CREATE TABLE prestacao_contas_tb (
+    id SERIAL PRIMARY KEY,
+    id_usuario INTEGER NOT NULL,
+    vl_camisa_total NUMERIC(10,2),
+    vl_camisa_pg NUMERIC(10,2) DEFAULT 0.00,
+    perc_camisa_pago NUMERIC(5,2) DEFAULT 0.00,
+    vl_mens_total NUMERIC(10,2),
+    vl_mens_pg NUMERIC(10,2) DEFAULT 0.00,
+    perc_mens_pago NUMERIC(5,2) DEFAULT 0.00,
+    forma_pagamento VARCHAR(50),
+    ano_vigente INTEGER NOT NULL,
+    dt_inclusao TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    dt_alteracao TIMESTAMP,
+    
+    -- Chave estrangeira
+    CONSTRAINT fk_prestacao_usuario FOREIGN KEY (id_usuario) REFERENCES usuario_tb(id) ON DELETE CASCADE
+);
+
+-- Índices para melhor performance
+CREATE INDEX idx_prestacao_usuario ON prestacao_contas_tb(id_usuario);
+CREATE INDEX idx_prestacao_ano ON prestacao_contas_tb(ano_vigente);
+CREATE INDEX idx_prestacao_usuario_ano ON prestacao_contas_tb(id_usuario, ano_vigente);
+
+-- Índice único para evitar duplicatas de usuário/ano
+CREATE UNIQUE INDEX idx_unique_usuario_ano ON prestacao_contas_tb(id_usuario, ano_vigente);
+
+-- =============================================================================
+-- TRIGGERS PARA ATUALIZAÇÃO AUTOMÁTICA
+-- =============================================================================
+
+-- Trigger para atualizar dt_alteracao automaticamente
+CREATE OR REPLACE FUNCTION update_timestamp()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.dt_alteracao = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Aplicar trigger nas tabelas
+CREATE TRIGGER trigger_usuario_update
+    BEFORE UPDATE ON usuario_tb
+    FOR EACH ROW
+    EXECUTE FUNCTION update_timestamp();
+
+CREATE TRIGGER trigger_parametros_update
+    BEFORE UPDATE ON parametros_tb
+    FOR EACH ROW
+    EXECUTE FUNCTION update_timestamp();
+
+CREATE TRIGGER trigger_prestacao_update
+    BEFORE UPDATE ON prestacao_contas_tb
+    FOR EACH ROW
+    EXECUTE FUNCTION update_timestamp();
+
+-- =============================================================================
+-- TRIGGER PARA CÁLCULO AUTOMÁTICO DE PERCENTUAIS
+-- =============================================================================
+
+-- Função para calcular percentuais automaticamente
+CREATE OR REPLACE FUNCTION calcular_percentuais_prestacao()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Calcular percentual camisa
+    IF NEW.vl_camisa_total IS NOT NULL AND NEW.vl_camisa_total > 0 THEN
+        IF NEW.vl_camisa_pg IS NOT NULL THEN
+            NEW.perc_camisa_pago = ROUND((NEW.vl_camisa_pg * 100.0) / NEW.vl_camisa_total, 2);
+        ELSE
+            NEW.perc_camisa_pago = 0.00;
+        END IF;
+    ELSE
+        NEW.perc_camisa_pago = 0.00;
+    END IF;
+
+    -- Calcular percentual mensalidade
+    IF NEW.vl_mens_total IS NOT NULL AND NEW.vl_mens_total > 0 THEN
+        IF NEW.vl_mens_pg IS NOT NULL THEN
+            NEW.perc_mens_pago = ROUND((NEW.vl_mens_pg * 100.0) / NEW.vl_mens_total, 2);
+        ELSE
+            NEW.perc_mens_pago = 0.00;
+        END IF;
+    ELSE
+        NEW.perc_mens_pago = 0.00;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Aplicar trigger de cálculo de percentuais
+CREATE TRIGGER trigger_calcular_percentuais
+    BEFORE INSERT OR UPDATE ON prestacao_contas_tb
+    FOR EACH ROW
+    EXECUTE FUNCTION calcular_percentuais_prestacao();
+
+-- =============================================================================
+-- TRIGGER PARA ATUALIZAR STATUS DE DÍVIDAS DO USUÁRIO
+-- =============================================================================
+
+-- Função para atualizar status de dívidas do usuário
+CREATE OR REPLACE FUNCTION atualizar_dividas_usuario()
+RETURNS TRIGGER AS $$
+DECLARE
+    tem_dividas BOOLEAN := FALSE;
+BEGIN
+    -- Verificar se o usuário tem dívidas (percentual < 100%)
+    SELECT CASE 
+        WHEN COUNT(*) > 0 THEN TRUE 
+        ELSE FALSE 
+    END INTO tem_dividas
+    FROM prestacao_contas_tb 
+    WHERE id_usuario = COALESCE(NEW.id_usuario, OLD.id_usuario)
+    AND (perc_camisa_pago < 100.00 OR perc_mens_pago < 100.00);
+    
+    -- Atualizar campo dividas na tabela usuario
+    UPDATE usuario_tb 
+    SET dividas = tem_dividas,
+        dt_alteracao = CURRENT_TIMESTAMP
+    WHERE id = COALESCE(NEW.id_usuario, OLD.id_usuario);
+    
+    RETURN COALESCE(NEW, OLD);
+END;
+$$ LANGUAGE plpgsql;
+
+-- Aplicar trigger de atualização de dívidas
+CREATE TRIGGER trigger_atualizar_dividas_usuario
+    AFTER INSERT OR UPDATE OR DELETE ON prestacao_contas_tb
+    FOR EACH ROW
+    EXECUTE FUNCTION atualizar_dividas_usuario();
+
+-- =============================================================================
+-- DADOS INICIAIS (OPCIONAL)
+-- =============================================================================
+
+-- Inserir parâmetros iniciais
+INSERT INTO parametros_tb (vl_mensalidade, vl_camisa) 
+VALUES (50.00, 35.00);
+
+-- =============================================================================
+-- VIEWS ÚTEIS PARA CONSULTAS
+-- =============================================================================
+
+-- View para relatório completo de usuários com prestação de contas
+CREATE VIEW vw_relatorio_completo AS
+SELECT 
+    u.id,
+    u.nome,
+    u.sexo,
+    u.cargo_min,
+    u.cargo_unijovem,
+    u.dividas,
+    pc.ano_vigente,
+    pc.vl_mens_total,
+    pc.vl_mens_pg,
+    pc.perc_mens_pago,
+    pc.vl_camisa_total,
+    pc.vl_camisa_pg,
+    pc.perc_camisa_pago,
+    pc.forma_pagamento
+FROM usuario_tb u
+LEFT JOIN prestacao_contas_tb pc ON u.id = pc.id_usuario
+ORDER BY u.nome, pc.ano_vigente DESC;
+
+-- View para usuários com dívidas
+CREATE VIEW vw_usuarios_com_dividas AS
+SELECT 
+    u.id,
+    u.nome,
+    u.sexo,
+    pc.ano_vigente,
+    pc.perc_mens_pago,
+    pc.perc_camisa_pago,
+    CASE 
+        WHEN pc.perc_mens_pago < 100 THEN 'Mensalidade em atraso'
+        WHEN pc.perc_camisa_pago < 100 THEN 'Camisa em atraso'
+        ELSE 'Em dia'
+    END as status_pagamento
+FROM usuario_tb u
+INNER JOIN prestacao_contas_tb pc ON u.id = pc.id_usuario
+WHERE u.dividas = TRUE
+ORDER BY u.nome, pc.ano_vigente DESC;
+
+-- =============================================================================
+-- COMENTÁRIOS NAS TABELAS
+-- =============================================================================
+
+COMMENT ON TABLE usuario_tb IS 'Tabela principal de usuários/jovens da igreja';
+COMMENT ON COLUMN usuario_tb.nome IS 'Nome completo do jovem (obrigatório)';
+COMMENT ON COLUMN usuario_tb.sexo IS 'Sexo: M=Masculino, F=Feminino';
+COMMENT ON COLUMN usuario_tb.cargo_min IS 'Indica se possui cargo ministerial';
+COMMENT ON COLUMN usuario_tb.dividas IS 'Indica se possui dívidas pendentes';
+
+COMMENT ON TABLE parametros_tb IS 'Parâmetros financeiros do sistema';
+COMMENT ON COLUMN parametros_tb.vl_mensalidade IS 'Valor da mensalidade atual';
+COMMENT ON COLUMN parametros_tb.vl_camisa IS 'Valor da camisa atual';
+
+COMMENT ON TABLE prestacao_contas_tb IS 'Prestação de contas anual por usuário';
+COMMENT ON COLUMN prestacao_contas_tb.ano_vigente IS 'Ano de referência da prestação';
+COMMENT ON COLUMN prestacao_contas_tb.perc_camisa_pago IS 'Percentual pago da camisa';
+COMMENT ON COLUMN prestacao_contas_tb.perc_mens_pago IS 'Percentual pago da mensalidade';
